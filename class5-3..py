@@ -1,0 +1,284 @@
+import streamlit as st
+from openai import OpenAI
+import urllib.request
+import urllib.parse
+import urllib.error
+
+# -----------------------------
+# 1. Page setup and API clients
+# -----------------------------
+
+st.set_page_config(page_title="My AI Chat", page_icon="✨", layout="centered")
+
+openai_client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+
+pollinations_api_key = st.secrets["POLLINATIONS_API_KEY"]
+
+# -----------------------------
+# 2. Session state
+# -----------------------------
+
+ss = st.session_state
+
+if "history" not in ss:
+    ss.history = []
+
+if "system_message" not in ss:
+    ss.system_message = "請用繁體中文進行後續對話"
+
+if "model" not in ss:
+    ss.model = "gpt-4o-mini"
+
+# -----------------------------
+# 3. Sidebar settings
+# -----------------------------
+
+with st.sidebar:
+    st.title("⚙️ Settings")
+
+    ss.system_message = st.text_area("系統提示", value=ss.system_message)
+
+    ss.model = st.selectbox(
+        "聊天 AI 模型",
+        [
+            "gpt-4o-mini",
+            "gpt-4",
+            "gpt-4o-searcher-preview",
+        ],
+        index=0,
+    )
+
+    image_mode = st.selectbox("圖片模式", ["自動判斷", "只聊天", "生成圖片"])
+
+    image_model = st.selectbox(
+        "圖片 AI 模型",
+        [
+            "black-forest-labs/flux.1-schnell",
+            "tongyi-mai/z-image-turbo",
+            "openai/gpt-image-2",
+        ],
+        index=0,
+    )
+
+    if st.button("🗑️ 清除聊天紀錄"):
+        ss.history = []
+        st.rerun()
+
+# -----------------------------
+# 4. Detect image requests
+# -----------------------------
+
+
+def wants_image(prompt):
+
+    keywords = [
+        # 中文
+        "畫一張",
+        "畫出",
+        "幫我畫",
+        "生成圖片",
+        "生成一張圖",
+        "製作圖片",
+        "做一張圖片",
+        "圖片生成",
+        "給我一張圖片",
+        "給我一張照片",
+        "我要圖片",
+        "我要照片",
+        "畫個",
+        "生成一張照片",
+        "畫一隻",
+        "畫一個",
+        "幫我畫一隻",
+        "幫我畫一個",
+        # English
+        "draw",
+        "generate an image",
+        "create an image",
+        "make a picture",
+        "generate a picture",
+        "create a picture",
+        "draw me",
+        "pic of",
+        "picture of",
+        "image of",
+        "photo of",
+        "show me a picture",
+        "give me a picture",
+        "give me a pic",
+    ]
+
+    prompt_lower = prompt.lower()
+
+    return any(word in prompt_lower for word in keywords)
+
+
+# -----------------------------
+# 5. Generate image with Pollinations
+# -----------------------------
+
+
+def generate_pollinations_image(prompt, model):
+
+    encoded_prompt = urllib.parse.quote(prompt, safe="")
+
+    params = urllib.parse.urlencode(
+        {
+            "model": model,
+            "width": 1024,
+            "height": 1024,
+        }
+    )
+
+    url = f"https://gen.pollinations.ai/image/" f"{encoded_prompt}?{params}"
+
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {pollinations_api_key}",
+            "Accept": "image/*",
+            "User-Agent": "MyAIChat/1.0",
+        },
+    )
+
+    with urllib.request.urlopen(request, timeout=180) as response:
+
+        content_type = response.headers.get("Content-Type", "")
+
+        image_bytes = response.read()
+
+        if not content_type.startswith("image/"):
+            raise Exception(f"API 回傳的不是圖片：{content_type}")
+
+        if not image_bytes:
+            raise Exception("圖片內容是空的。")
+
+        return image_bytes
+
+
+# -----------------------------
+# 6. Main chat interface
+# -----------------------------
+
+st.title("✨ My AI Chat")
+st.caption("Chat with AI and create pictures!")
+
+# Display previous messages
+
+for message in ss.history:
+
+    with st.chat_message(
+        message["role"], avatar="🪄" if message["role"] == "user" else "✨"
+    ):
+
+        if message.get("content"):
+            st.markdown(message["content"])
+
+        if message.get("image"):
+            st.image(message["image"], use_container_width=True)
+
+# -----------------------------
+# 7. Chat input
+# -----------------------------
+
+prompt = st.chat_input("請輸入訊息，或告訴 AI 你想畫什麼...")
+
+if prompt:
+
+    # Show user message
+
+    ss.history.append({"role": "user", "content": prompt})
+
+    with st.chat_message("user", avatar="🪄"):
+        st.markdown(prompt)
+
+    # Decide whether to generate an image
+
+    if image_mode == "生成圖片":
+        generate_image = True
+
+    elif image_mode == "只聊天":
+        generate_image = False
+
+    else:
+        generate_image = wants_image(prompt)
+
+    # -----------------------------
+    # 8. Image generation
+    # -----------------------------
+
+    if generate_image:
+
+        with st.chat_message("assistant", avatar="✨"):
+
+            with st.spinner("🎨 Pollinations 正在創作圖片..."):
+
+                try:
+
+                    generated_image = generate_pollinations_image(prompt, image_model)
+
+                    st.image(
+                        generated_image,
+                        caption=f"Generated by Pollinations ({image_model})",
+                        use_container_width=True,
+                    )
+
+                    assistant_text = "🎨 圖片生成成功！"
+
+                    st.success(assistant_text)
+
+                    ss.history.append(
+                        {
+                            "role": "assistant",
+                            "content": assistant_text,
+                            "image": generated_image,
+                        }
+                    )
+
+                except urllib.error.HTTPError as e:
+
+                    error_details = e.read().decode("utf-8", errors="replace")
+
+                    st.error(
+                        f"圖片生成失敗：HTTP {e.code}\n\n" f"{error_details[:1500]}"
+                    )
+
+                except Exception as e:
+
+                    st.error(f"圖片生成失敗：{e}")
+
+    # -----------------------------
+    # 9. Normal AI chatting
+    # -----------------------------
+
+    else:
+
+        with st.chat_message("assistant", avatar="✨"):
+
+            with st.spinner("AI 正在思考..."):
+
+                try:
+
+                    messages = [{"role": "system", "content": ss.system_message}]
+
+                    for item in ss.history:
+
+                        messages.append(
+                            {"role": item["role"], "content": item.get("content", "")}
+                        )
+
+                    response = openai_client.chat.completions.create(
+                        model=ss.model, messages=messages
+                    )
+
+                    assistant_message = response.choices[0].message.content
+
+                    st.markdown(assistant_message)
+
+                    ss.history.append(
+                        {"role": "assistant", "content": assistant_message}
+                    )
+
+                except Exception as e:
+
+                    st.error(f"聊天發生錯誤：{e}")
